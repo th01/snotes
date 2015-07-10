@@ -1,33 +1,42 @@
-require 'bcrypt'
-require 'colorize'
 require 'digest/sha1'
 require 'io/console'
+
+require 'colorize'
+require 'gibberish'
 require 'readline'
 require 'sqlite3'
 
-# Open a SQLite 3 database file
-@db = SQLite3::Database.new 'main.sqlite'
-@stored_hashed_password = @db.execute('SELECT * FROM data WHERE key = \'hashed password\'').flatten[1]
+def initialize_db
+  @db = SQLite3::Database.new 'main.sqlite'
+  create_table if @db.execute("SELECT * FROM sqlite_master WHERE name='data' and type='table';").empty?
+  stored_hashed_password = @db.execute('SELECT * FROM data WHERE key = \'hashed password\'').first[1] rescue set_password
+  while hashed_password != stored_hashed_password do
+    get_password
+  end
+  @cipher = Gibberish::AES.new(@password + ENV.fetch('SALT'))
+end
 
 def get_password
   print ("\n[#{"#{'Password'}".colorize(:yellow)}]>> ")
   @password = STDIN.noecho(&:gets).chomp
-  @hashed_password = Digest::SHA1.hexdigest(@password + ENV.fetch('SALT'))
   puts "\n\n"
+  hashed_password
 end
 
-
-while @hashed_password != @stored_hashed_password do
-  get_password
+def encrypt(data)
+  @cipher.encrypt(data)
 end
 
+def decrypt(encrypted_data)
+  @cipher.decrypt(encrypted_data)
+end
 
 def make_a_selection(question, selections, prompt)
   puts "\n#{question}\n".colorize(:green)
   selections.each_with_index { |s,i| puts "#{i + 1}: #{s.to_s.split('_').map(&:capitalize).join(' ').colorize(:light_blue)}" }
   invalid_answer, index = true, nil
   while invalid_answer do
-    index = prompt(prompt, :yellow).to_i - 1
+    index = prompt(prompt).to_i - 1
     invalid_answer = false if index != -1 && selections[index]
   end
   puts "\n"
@@ -39,27 +48,44 @@ def prompt(value)
 end
 
 def create_table
-  result = @db.execute <<-SQL
+  @db.execute <<-SQL
     CREATE TABLE data (
-      key VARCHAR(255),
-      val BLOB
+      key TEXT,
+      val TEXT
     );
   SQL
 end
 
 
+def set_password
+  puts 'Insert your new password'
+  new_password = get_password
+  if new_password == get_password
+    @db.execute("insert into data values ( ?, ? )", ['hashed password', hashed_password])
+  else
+    puts 'Passwords did not match. Try Again.'
+    set_password
+  end
+  @db.execute('SELECT * FROM data WHERE key = \'hashed password\'').first[1]
+end
+
+def hashed_password
+  @password ||= ''
+  Digest::SHA1.hexdigest(@password + ENV.fetch('SALT'))
+end
 
 def add_entry(key,value)
-  # Insert some data into it
-  { 'one' => 1, 'two' => 2 }.each do |pair|
-    db.execute 'insert into data values (?, ?)', pair
-  end
+  encrypted_value = encrypt(value)
+  @db.execute 'insert into data values (?, ?)', [key, encrypted_value]
 end
 
 def retrieve_entry
   # Find some records
-  db.execute 'SELECT * FROM data' do |row|
-    p row
+  @db.execute 'SELECT * FROM data' do |row|
+    key = row[0]
+    next if row[0] == 'hashed password'
+    value = decrypt(row[1])
+    puts "#{key}: #{value}"
   end
 end
 
@@ -68,9 +94,6 @@ end
 
 def change_password
 end
-
-
-
 
 def make_selection
   selection = make_a_selection(
@@ -90,5 +113,14 @@ def make_selection
     add_entry(key,value)
   when :retrieve_entry
     retrieve_entry
+  when :remove_entry
+    retrieve_entry
+  when :change_password
+    change_password
   end
 end
+
+
+
+initialize_db
+make_selection
